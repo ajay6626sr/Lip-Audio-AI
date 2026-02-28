@@ -155,11 +155,8 @@ let recognition = null;
 let finalTranscript = "";
 let audioEnergy = 0;
 let ambientNoise = 0;
-let speakingScore = 0;
-let activeSpeaker = "None";
 let audioStream = null;
 let currentWord = "";
-let speakingDetected = false;
 let confidenceScore = 0;
 
 let lastSpeakerIndex = -1;
@@ -173,18 +170,13 @@ let speakerTranscripts = {
     "Person 5": ""
 };
 
-/* ================= AI SUMMARIZER ================= */
+/* ================= SUMMARIZER ================= */
 function summarizeText(text){
     if(!text || text.length < 40)
         return "Speech data insufficient for intelligent summarization.";
 
     const words = text.toLowerCase().match(/\b[a-z]+\b/g) || [];
-    const stopwords = new Set([
-        "is","am","are","was","were","be","been","being",
-        "the","a","an","and","or","but","to","of","in","on",
-        "for","with","this","that","it","as","at","by",
-        "i","you","he","she","they","we","my","your","our"
-    ]);
+    const stopwords = new Set(["is","am","are","was","were","be","been","being","the","a","an","and","or","but","to","of","in","on","for","with","this","that","it","as","at","by","i","you","he","she","they","we","my","your","our"]);
 
     const freq = {};
     words.forEach(w=>{
@@ -198,15 +190,11 @@ function summarizeText(text){
 
     const topic = topKeywords.join(", ");
 
-    const nameMatch = text.match(/\b[A-Z][a-z]+\b/);
-    const name = nameMatch ? nameMatch[0] : "The speaker";
-
     const templates = [
-        `${name} discussed key topics including ${topic}.`,
-        `${name} presented an overview focusing on ${topic}.`,
-        `The session highlighted ${topic}, explained by ${name}.`,
-        `${name} elaborated on important aspects of ${topic}.`,
-        `Major insights revolved around ${topic}.`
+        `The session discussed key topics including ${topic}.`,
+        `Important concepts such as ${topic} were explained.`,
+        `The discussion focused on ${topic}.`,
+        `Major highlights revolved around ${topic}.`
     ];
 
     return templates[Math.floor(Math.random()*templates.length)];
@@ -228,9 +216,9 @@ async function initAudio(){
 
     function updateEnergy(){
         analyser.getByteFrequencyData(data);
-        const rawEnergy = data.reduce((a,b)=>a+b,0)/data.length/255;
+        const raw = data.reduce((a,b)=>a+b,0)/data.length/255;
 
-        audioEnergy = 0.8*audioEnergy + 0.2*rawEnergy;
+        audioEnergy = 0.8*audioEnergy + 0.2*raw;
         ambientNoise = 0.95*ambientNoise + 0.05*audioEnergy;
 
         requestAnimationFrame(updateEnergy);
@@ -266,9 +254,6 @@ mesh.onResults(res=>{
     canvas.height=video.videoHeight;
     ctx.clearRect(0,0,canvas.width,canvas.height);
 
-    speakingDetected=false;
-    activeSpeaker="None";
-
     if(!res.multiFaceLandmarks || !res.multiFaceLandmarks.length){
         lipStatus.textContent="No Face";
         lipStatus.className="red";
@@ -278,13 +263,13 @@ mesh.onResults(res=>{
     lipStatus.textContent=`Tracking (${res.multiFaceLandmarks.length})`;
     lipStatus.className="green";
 
-    /* -------- Face ID Locking (Leftmost = Person 1) -------- */
+    // Leftmost face = Person 1
     const faceOrder = res.multiFaceLandmarks
         .map((face,index)=>({index,x:face[1].x}))
         .sort((a,b)=>a.x-b.x);
 
     let maxMotion=0;
-    let activeIndex=-1;
+    let detectedIndex=-1;
 
     res.multiFaceLandmarks.forEach((face,index)=>{
         const dx=face[13].x-face[14].x;
@@ -293,20 +278,26 @@ mesh.onResults(res=>{
 
         if(mouthOpen>maxMotion){
             maxMotion=mouthOpen;
-            activeIndex=index;
+            detectedIndex=index;
         }
     });
 
-    /* -------- Speaker Smoothing -------- */
-    if(activeIndex===lastSpeakerIndex){
+    // Speaker smoothing (fixed)
+    if(lastSpeakerIndex === -1){
+        lastSpeakerIndex = detectedIndex;
+    }
+
+    if(detectedIndex === lastSpeakerIndex){
         speakerHoldFrames++;
     } else {
-        if(speakerHoldFrames>5){
-            lastSpeakerIndex=activeIndex;
-            speakerHoldFrames=0;
-        }
+        speakerHoldFrames = 0;
     }
-    activeIndex=lastSpeakerIndex;
+
+    if(speakerHoldFrames > 3){
+        lastSpeakerIndex = detectedIndex;
+    }
+
+    const activeIndex = lastSpeakerIndex;
 
     res.multiFaceLandmarks.forEach((face,index)=>{
 
@@ -319,11 +310,10 @@ mesh.onResults(res=>{
 
         if(index===activeIndex && maxMotion>0.02 && audioEnergy>(ambientNoise+0.01)){
 
-            speakingDetected=true;
-
             const stableID = faceOrder.findIndex(f=>f.index===index);
-            activeSpeaker="Person "+(stableID+1);
+            const speakerName="Person "+(stableID+1);
 
+            // Green lip contour
             const outerLips=[61,146,91,181,84,17,314,405,321,375,291];
 
             ctx.strokeStyle="#00ff00";
@@ -339,27 +329,27 @@ mesh.onResults(res=>{
             ctx.closePath();
             ctx.stroke();
 
+            // Word bubble
             ctx.fillStyle="yellow";
             ctx.font="bold 18px Segoe UI";
             ctx.fillText(
-                activeSpeaker+": "+currentWord,
+                speakerName+": "+currentWord,
                 face[13].x*canvas.width-60,
                 face[13].y*canvas.height-30
             );
         }
     });
 
-    /* -------- Confidence Blending -------- */
-    const lipConfidence=Math.min(1,maxMotion*40);
-    const audioConfidence=Math.min(1,audioEnergy*4);
+    // Confidence blending (fixed scaling)
+    const lipConf=Math.min(1,maxMotion*20);
+    const audioConf=Math.min(1,audioEnergy*3);
+    confidenceScore=Math.round((lipConf*0.6+audioConf*0.4)*100);
 
-    confidenceScore=Math.round((lipConfidence*0.5+audioConfidence*0.5)*100);
     energyBar.style.width=confidenceScore+"%";
 
     systemStatus.innerHTML=
         "✓ Lip Motion Tracking Active<br>"+
         (audioEnergy>(ambientNoise+0.01)?"✓ Audio Energy Validated<br>":"✗ Audio Energy Low<br>")+
-        (speakingDetected?"✓ Multimodal Sync Active<br>":"✗ Waiting for Speech<br>")+
         "✓ AI Extractive Summarization Ready<br>"+
         "✓ Multimodal Confidence: "+confidenceScore+"%";
 });
@@ -391,20 +381,11 @@ startBtn.onclick=async()=>{
             currentWord=words.slice(-1).join(" ");
 
             if(e.results[i].isFinal){
-                if(activeSpeaker!=="None"){
-                    speakerTranscripts[activeSpeaker]+=txt+" ";
-                }
                 finalTranscript+=txt+" ";
             }
         }
 
-        let display="";
-        Object.keys(speakerTranscripts).forEach(s=>{
-            if(speakerTranscripts[s])
-                display+=s+": "+speakerTranscripts[s]+"\n\n";
-        });
-
-        liveText.textContent=display||"Listening...";
+        liveText.textContent=finalTranscript || "Listening...";
     };
 
     recognition.start();
@@ -427,5 +408,6 @@ stopBtn.onclick=()=>{
 </body>
 
 </html>
+
 
 
