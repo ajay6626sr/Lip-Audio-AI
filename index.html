@@ -154,13 +154,10 @@ const stopBtn = document.getElementById("stopBtn");
 let recognition = null;
 let finalTranscript = "";
 let audioEnergy = 0;
-let ambientNoise = 0;
+let speakingScore = 0;
+let activeSpeaker = "None";
 let audioStream = null;
 let currentWord = "";
-let confidenceScore = 0;
-
-let lastSpeakerIndex = -1;
-let speakerHoldFrames = 0;
 
 let speakerTranscripts = {
     "Person 1": "",
@@ -170,41 +167,92 @@ let speakerTranscripts = {
     "Person 5": ""
 };
 
-/* ================= SUMMARIZER ================= */
+/* ================= AI STYLE SUMMARIZER ================= */
 function summarizeText(text){
-    if(!text || text.length < 40)
-        return "Speech data insufficient for intelligent summarization.";
+
+    if(!text || text.length < 30)
+        return "Insufficient speech data for intelligent summarization.";
+
+    const sentences = text.match(/[^.!?]+[.!?]?/g);
+    if(!sentences) return text;
 
     const words = text.toLowerCase().match(/\b[a-z]+\b/g) || [];
-    const stopwords = new Set(["is","am","are","was","were","be","been","being","the","a","an","and","or","but","to","of","in","on","for","with","this","that","it","as","at","by","i","you","he","she","they","we","my","your","our"]);
+
+    const stopwords = new Set([
+        "is","am","are","was","were","be","been","being","the","a","an",
+        "and","or","but","to","of","in","on","for","with","this","that",
+        "it","as","at","by","i","you","he","she","they","we","my","your",
+        "our","today","hello","hi"
+    ]);
 
     const freq = {};
     words.forEach(w=>{
         if(!stopwords.has(w))
-            freq[w]=(freq[w]||0)+1;
+            freq[w] = (freq[w]||0)+1;
     });
 
-    const topKeywords = Object.keys(freq)
+    const sortedKeywords = Object.keys(freq)
         .sort((a,b)=>freq[b]-freq[a])
-        .slice(0,4);
+        .slice(0,3);
 
-    const topic = topKeywords.join(", ");
+    const keywordPhrase = sortedKeywords.join(", ");
 
-    const templates = [
-        `The session discussed key topics including ${topic}.`,
-        `Important concepts such as ${topic} were explained.`,
-        `The discussion focused on ${topic}.`,
-        `Major highlights revolved around ${topic}.`
+    const nameMatch = text.match(/\b[A-Z][a-z]+\b/);
+    const name = nameMatch ? nameMatch[0] : "The speaker";
+
+    const patterns = [
+
+        `${name} introduced the session focusing on ${keywordPhrase}.`,
+
+        `${name} provided an overview discussing ${keywordPhrase}.`,
+
+        `The discussion by ${name} highlighted key aspects of ${keywordPhrase}.`,
+
+        `${name} explained important concepts related to ${keywordPhrase}.`,
+
+        `${name} described the topic and emphasized ${keywordPhrase}.`,
+
+        `This session covered major ideas including ${keywordPhrase}, presented by ${name}.`,
+
+        `${name} initiated the talk and explored themes such as ${keywordPhrase}.`,
+
+        `Key discussion points included ${keywordPhrase}, explained during the session.`,
+
+        `${name} outlined the core subject matter involving ${keywordPhrase}.`,
+
+        `The presentation focused on ${keywordPhrase}, introduced by ${name}.`,
+
+        `${name} summarized insights related to ${keywordPhrase}.`,
+
+        `Important highlights included ${keywordPhrase} as described by ${name}.`,
+
+        `${name} presented an informative session covering ${keywordPhrase}.`,
+
+        `The speaker elaborated on ${keywordPhrase} during the discussion.`,
+
+        `${name} analyzed and discussed ${keywordPhrase}.`,
+
+        `The session emphasized ${keywordPhrase}, offering structured insights.`,
+
+        `${name} addressed critical elements such as ${keywordPhrase}.`,
+
+        `Core concepts including ${keywordPhrase} were explained by ${name}.`,
+
+        `${name} discussed practical and theoretical aspects of ${keywordPhrase}.`,
+
+        `An overview of ${keywordPhrase} was provided in this session.`
     ];
 
-    return templates[Math.floor(Math.random()*templates.length)];
+    const randomIndex = Math.floor(Math.random()*patterns.length);
+
+    return patterns[randomIndex];
 }
 
-/* ================= AUDIO ================= */
-async function initAudio(){
-    if(audioStream) return;
+/* ================= AUDIO ENERGY ================= */
+async function initAudio() {
+    if (audioStream) return;
 
-    audioStream = await navigator.mediaDevices.getUserMedia({audio:true});
+    audioStream = await navigator.mediaDevices.getUserMedia({ audio: true });
     const audioCtx = new AudioContext();
     const src = audioCtx.createMediaStreamSource(audioStream);
     const analyser = audioCtx.createAnalyser();
@@ -214,21 +262,19 @@ async function initAudio(){
 
     const data = new Uint8Array(analyser.frequencyBinCount);
 
-    function updateEnergy(){
+    function updateEnergy() {
         analyser.getByteFrequencyData(data);
-        const raw = data.reduce((a,b)=>a+b,0)/data.length/255;
-
-        audioEnergy = 0.8*audioEnergy + 0.2*raw;
-        ambientNoise = 0.95*ambientNoise + 0.05*audioEnergy;
-
+        const sum = data.reduce((a,b)=>a+b,0);
+        audioEnergy = sum/data.length/255;
         requestAnimationFrame(updateEnergy);
     }
+
     updateEnergy();
 }
 
 /* ================= CAMERA ================= */
-async function startCamera(){
-    const stream = await navigator.mediaDevices.getUserMedia({video:true});
+async function startCamera() {
+    const stream = await navigator.mediaDevices.getUserMedia({ video:true });
     video.srcObject = stream;
     camStatus.textContent="Active";
     camStatus.className="green";
@@ -237,7 +283,7 @@ startCamera();
 
 /* ================= FACEMESH ================= */
 const mesh = new FaceMesh({
-    locateFile:f=>`https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh/${f}`
+    locateFile: f => `https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh/${f}`
 });
 
 mesh.setOptions({
@@ -248,11 +294,16 @@ mesh.setOptions({
 });
 
 mesh.onResults(res=>{
+
     if(!video.videoWidth) return;
 
     canvas.width=video.videoWidth;
     canvas.height=video.videoHeight;
     ctx.clearRect(0,0,canvas.width,canvas.height);
+
+    activeSpeaker="None";
+    let maxMotion=0;
+    let speakingDetected=false;
 
     if(!res.multiFaceLandmarks || !res.multiFaceLandmarks.length){
         lipStatus.textContent="No Face";
@@ -263,63 +314,39 @@ mesh.onResults(res=>{
     lipStatus.textContent=`Tracking (${res.multiFaceLandmarks.length})`;
     lipStatus.className="green";
 
-    // Leftmost face = Person 1
-    const faceOrder = res.multiFaceLandmarks
-        .map((face,index)=>({index,x:face[1].x}))
-        .sort((a,b)=>a.x-b.x);
-
-    let maxMotion=0;
-    let detectedIndex=-1;
-
-    res.multiFaceLandmarks.forEach((face,index)=>{
-        const dx=face[13].x-face[14].x;
-        const dy=face[13].y-face[14].y;
-        const mouthOpen=Math.sqrt(dx*dx+dy*dy);
-
-        if(mouthOpen>maxMotion){
-            maxMotion=mouthOpen;
-            detectedIndex=index;
-        }
-    });
-
-    // Speaker smoothing (fixed)
-    if(lastSpeakerIndex === -1){
-        lastSpeakerIndex = detectedIndex;
-    }
-
-    if(detectedIndex === lastSpeakerIndex){
-        speakerHoldFrames++;
-    } else {
-        speakerHoldFrames = 0;
-    }
-
-    if(speakerHoldFrames > 3){
-        lastSpeakerIndex = detectedIndex;
-    }
-
-    const activeIndex = lastSpeakerIndex;
-
     res.multiFaceLandmarks.forEach((face,index)=>{
 
-        ctx.fillStyle="red";
         face.forEach(p=>{
             ctx.beginPath();
-            ctx.arc(p.x*canvas.width,p.y*canvas.height,1.2,0,2*Math.PI);
+            ctx.arc(p.x*canvas.width,p.y*canvas.height,1.5,0,2*Math.PI);
+            ctx.fillStyle="red";
             ctx.fill();
         });
 
-        if(index===activeIndex && maxMotion>0.02 && audioEnergy>(ambientNoise+0.01)){
+        const outer=[61,146,91,181,84,17,314,405,321,375,291];
 
-            const stableID = faceOrder.findIndex(f=>f.index===index);
-            const speakerName="Person "+(stableID+1);
+        if(face[13] && face[14]){
+            const dx=face[13].x-face[14].x;
+            const dy=face[13].y-face[14].y;
+            const mouthOpen=Math.sqrt(dx*dx+dy*dy);
 
-            // Green lip contour
-            const outerLips=[61,146,91,181,84,17,314,405,321,375,291];
+            if(mouthOpen>maxMotion){
+                maxMotion=mouthOpen;
+                activeSpeaker="Person "+(index+1);
+            }
 
-            ctx.strokeStyle="#00ff00";
-            ctx.lineWidth=2;
+            if(mouthOpen>0.015){
+                speakingDetected=true;
+
+                ctx.strokeStyle="#00ff00";
+                ctx.lineWidth=3;
+            } else {
+                ctx.strokeStyle="#00aa00";
+                ctx.lineWidth=2;
+            }
+
             ctx.beginPath();
-            outerLips.forEach((id,i)=>{
+            outer.forEach((id,i)=>{
                 const p=face[id];
                 const x=p.x*canvas.width;
                 const y=p.y*canvas.height;
@@ -329,29 +356,34 @@ mesh.onResults(res=>{
             ctx.closePath();
             ctx.stroke();
 
-            // Word bubble
-            ctx.fillStyle="yellow";
-            ctx.font="bold 18px Segoe UI";
-            ctx.fillText(
-                speakerName+": "+currentWord,
-                face[13].x*canvas.width-60,
-                face[13].y*canvas.height-30
-            );
+            if(currentWord && speakingDetected){
+                ctx.fillStyle="yellow";
+                ctx.font="bold 16px Segoe UI";
+                ctx.fillText(
+                    activeSpeaker+" Speaking",
+                    face[13].x*canvas.width,
+                    face[13].y*canvas.height-40
+                );
+                ctx.fillText(
+                    currentWord,
+                    face[13].x*canvas.width,
+                    face[13].y*canvas.height-20
+                );
+            }
         }
     });
 
-    // Confidence blending (fixed scaling)
-    const lipConf=Math.min(1,maxMotion*20);
-    const audioConf=Math.min(1,audioEnergy*3);
-    confidenceScore=Math.round((lipConf*0.6+audioConf*0.4)*100);
+   systemStatus.innerHTML =
+    "✓ Lip Motion Tracking Active<br>" +
+    (audioEnergy>0.01?"✓ Audio Energy Validated<br>":"✗ Audio Energy Low<br>") +
+    (speakingDetected?"✓ Multimodal Sync Active<br>":"✗ Waiting for Speech<br>") +
+    "✓ AI Extractive Summarization Ready<br>";
 
-    energyBar.style.width=confidenceScore+"%";
+    energyBar.style.width = speakingScore>0.018 ? "100%" : "10%";
 
-    systemStatus.innerHTML=
-        "✓ Lip Motion Tracking Active<br>"+
-        (audioEnergy>(ambientNoise+0.01)?"✓ Audio Energy Validated<br>":"✗ Audio Energy Low<br>")+
-        "✓ AI Extractive Summarization Ready<br>"+
-        "✓ Multimodal Confidence: "+confidenceScore+"%";
+    const confidence = Math.min(100, Math.round((audioEnergy*50 + speakingScore*50)));
+
+    systemStatus.innerHTML += "✓ Multimodal Confidence: " + confidence + "%";
 });
 
 new Camera(video,{
@@ -362,6 +394,7 @@ new Camera(video,{
 const SpeechRecognition=window.SpeechRecognition||window.webkitSpeechRecognition;
 
 startBtn.onclick=async()=>{
+
     if(!SpeechRecognition){
         liveText.textContent="SpeechRecognition not supported";
         return;
@@ -375,17 +408,27 @@ startBtn.onclick=async()=>{
     recognition.lang="en-US";
 
     recognition.onresult=e=>{
+        let interim="";
+
         for(let i=e.resultIndex;i<e.results.length;i++){
             const txt=e.results[i][0].transcript;
             const words=txt.trim().split(" ");
-            currentWord=words.slice(-1).join(" ");
-
+            currentWord = words.slice(-2).join(" ");
             if(e.results[i].isFinal){
+                speakerTranscripts[activeSpeaker]+=txt+" ";
                 finalTranscript+=txt+" ";
+            } else {
+                interim+=txt;
             }
         }
 
-        liveText.textContent=finalTranscript || "Listening...";
+        let display="";
+        Object.keys(speakerTranscripts).forEach(s=>{
+            if(speakerTranscripts[s])
+                display+=s+": "+speakerTranscripts[s]+"\n\n";
+        });
+
+        liveText.textContent=display||"Listening...";
     };
 
     recognition.start();
@@ -405,9 +448,6 @@ stopBtn.onclick=()=>{
     summaryText.textContent=summarizeText(finalTranscript);
 };
 </script>
+
 </body>
-
 </html>
-
-
-
