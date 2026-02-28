@@ -158,6 +158,8 @@ let speakingScore = 0;
 let activeSpeaker = "None";
 let audioStream = null;
 let currentWord = "";
+let speakingDetected = false;
+let systemStatus = document.getElementById("systemStatus");
 
 let speakerTranscripts = {
     "Person 1": "",
@@ -293,99 +295,96 @@ mesh.setOptions({
     minTrackingConfidence:0.5
 });
 
-mesh.onResults(res=>{
+mesh.onResults(res => {
 
-    if(!video.videoWidth) return;
+    if (!video.videoWidth) return;
 
-    canvas.width=video.videoWidth;
-    canvas.height=video.videoHeight;
-    ctx.clearRect(0,0,canvas.width,canvas.height);
+    canvas.width = video.videoWidth;
+    canvas.height = video.videoHeight;
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
 
-    activeSpeaker="None";
-    let maxMotion=0;
-    let speakingDetected=false;
+    speakingDetected = false;
+    activeSpeaker = "None";
 
-    if(!res.multiFaceLandmarks || !res.multiFaceLandmarks.length){
-        lipStatus.textContent="No Face";
-        lipStatus.className="red";
+    if (!res.multiFaceLandmarks || !res.multiFaceLandmarks.length) {
+        lipStatus.textContent = "No Face";
+        lipStatus.className = "red";
+        energyBar.style.width = "10%";
         return;
     }
 
-    lipStatus.textContent=`Tracking (${res.multiFaceLandmarks.length})`;
-    lipStatus.className="green";
+    lipStatus.textContent = `Tracking (${res.multiFaceLandmarks.length})`;
+    lipStatus.className = "green";
 
-    res.multiFaceLandmarks.forEach((face,index)=>{
+    let maxMotion = 0;
+    let activeSpeakerIndex = -1;
 
-        face.forEach(p=>{
-            ctx.beginPath();
-            ctx.arc(p.x*canvas.width,p.y*canvas.height,1.5,0,2*Math.PI);
-            ctx.fillStyle="red";
-            ctx.fill();
-        });
+    // ---------- STEP 1: Find strongest mouth motion ----------
+    res.multiFaceLandmarks.forEach((face, index) => {
 
-        const outer=[61,146,91,181,84,17,314,405,321,375,291];
+        if (face[13] && face[14]) {
 
-        if(face[13] && face[14]){
-            const dx=face[13].x-face[14].x;
-            const dy=face[13].y-face[14].y;
-            const mouthOpen=Math.sqrt(dx*dx+dy*dy);
+            const dx = face[13].x - face[14].x;
+            const dy = face[13].y - face[14].y;
+            const mouthOpen = Math.sqrt(dx * dx + dy * dy);
 
-            if(mouthOpen>maxMotion){
-                maxMotion=mouthOpen;
-                activeSpeaker="Person "+(index+1);
-            }
-
-            if(mouthOpen>0.015){
-                speakingDetected=true;
-
-                ctx.strokeStyle="#00ff00";
-                ctx.lineWidth=3;
-            } else {
-                ctx.strokeStyle="#00aa00";
-                ctx.lineWidth=2;
-            }
-
-            ctx.beginPath();
-            outer.forEach((id,i)=>{
-                const p=face[id];
-                const x=p.x*canvas.width;
-                const y=p.y*canvas.height;
-                if(i===0) ctx.moveTo(x,y);
-                else ctx.lineTo(x,y);
-            });
-            ctx.closePath();
-            ctx.stroke();
-
-            if(currentWord && speakingDetected){
-                ctx.fillStyle="yellow";
-                ctx.font="bold 16px Segoe UI";
-                ctx.fillText(
-                    activeSpeaker+" Speaking",
-                    face[13].x*canvas.width,
-                    face[13].y*canvas.height-40
-                );
-                ctx.fillText(
-                    currentWord,
-                    face[13].x*canvas.width,
-                    face[13].y*canvas.height-20
-                );
+            if (mouthOpen > maxMotion) {
+                maxMotion = mouthOpen;
+                activeSpeakerIndex = index;
             }
         }
     });
 
-   systemStatus.innerHTML =
-    "✓ Lip Motion Tracking Active<br>" +
-    (audioEnergy>0.01?"✓ Audio Energy Validated<br>":"✗ Audio Energy Low<br>") +
-    (speakingDetected?"✓ Multimodal Sync Active<br>":"✗ Waiting for Speech<br>") +
-    "✓ AI Extractive Summarization Ready<br>";
+    // ---------- STEP 2: Draw all faces ----------
+    res.multiFaceLandmarks.forEach((face, index) => {
 
-    energyBar.style.width = speakingScore>0.018 ? "100%" : "10%";
+        ctx.fillStyle = "red";
 
-    const confidence = Math.min(100, Math.round((audioEnergy*50 + speakingScore*50)));
+        face.forEach(p => {
+            ctx.beginPath();
+            ctx.arc(p.x * canvas.width, p.y * canvas.height, 1.2, 0, 2 * Math.PI);
+            ctx.fill();
+        });
 
-    systemStatus.innerHTML += "✓ Multimodal Confidence: " + confidence + "%";
+        // Only highlight strongest speaker
+        if (index === activeSpeakerIndex && maxMotion > 0.02 && audioEnergy > 0.015) {
+
+            speakingDetected = true;
+            activeSpeaker = "Person " + (index + 1);
+
+            const mouthPoint = face[13];
+
+            // Green lip highlight
+            ctx.strokeStyle = "#00ff00";
+            ctx.lineWidth = 2;
+            ctx.beginPath();
+            ctx.arc(mouthPoint.x * canvas.width,
+                    mouthPoint.y * canvas.height,
+                    20, 0, 2 * Math.PI);
+            ctx.stroke();
+
+            // Word bubble text
+            ctx.fillStyle = "yellow";
+            ctx.font = "bold 18px Segoe UI";
+            ctx.fillText(
+                activeSpeaker + " Speaking",
+                mouthPoint.x * canvas.width - 60,
+                mouthPoint.y * canvas.height - 30
+            );
+
+            speakingScore = 0.9 * speakingScore + 0.1 * maxMotion;
+        }
+    });
+
+    // ---------- STEP 3: Update system status ----------
+    systemStatus.innerHTML =
+        "✓ Lip Motion Tracking Active<br>" +
+        (audioEnergy > 0.015 ? "✓ Audio Energy Validated<br>" : "✗ Audio Energy Low<br>") +
+        (speakingDetected ? "✓ Multimodal Sync Active<br>" : "✗ Waiting for Speech<br>") +
+        "✓ AI Extractive Summarization Ready";
+
+    energyBar.style.width = speakingScore > 0.018 ? "100%" : "10%";
 });
-
 new Camera(video,{
     onFrame:async()=>await mesh.send({image:video})
 }).start();
@@ -450,4 +449,5 @@ stopBtn.onclick=()=>{
 </script>
 
 </body>
+
 </html>
